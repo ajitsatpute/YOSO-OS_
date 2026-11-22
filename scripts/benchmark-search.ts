@@ -1,0 +1,4 @@
+import {config} from "dotenv";config({path:".env.local"});
+import {createClient} from "@supabase/supabase-js";
+const db=createClient(process.env.NEXT_PUBLIC_SUPABASE_URL!,process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY!);
+async function main(){const email=process.env.BENCH_EMAIL!,password=process.env.BENCH_PASSWORD!;const {error:authError}=await db.auth.signInWithPassword({email,password});if(authError)throw authError;const query=process.env.BENCH_QUERY||"campaign update";const start=performance.now();const {data,error}=await db.from("chat_messages").select("id,text,sender_name,sent_at").textSearch("search_vector",query,{type:"websearch",config:"simple"}).order("sent_at",{ascending:false}).limit(50);const ms=performance.now()-start;if(error)throw error;console.log(JSON.stringify({query,returned:data?.length||0,elapsedMs:Number(ms.toFixed(2)),targetMs:500,passed:ms<500},null,2));if(ms>=500)process.exitCode=2}main().catch(e=>{console.error(e);process.exit(1)});

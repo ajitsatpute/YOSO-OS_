@@ -1,0 +1,256 @@
+import { describe, it, expect } from "vitest";
+import { buildPlan } from "../lib/planner";
+import type { PlannerPerson, WorkItem } from "../lib/types";
+
+const DAY = 24 * 60 * 60 * 1000;
+
+function mondayStart(): Date {
+  const d = new Date();
+  d.setUTCHours(0, 0, 0, 0);
+  d.setUTCDate(d.getUTCDate() - ((d.getUTCDay() + 6) % 7));
+  return d;
+}
+
+function dueInWeek(week: number, dayOffset = 4): string {
+  return new Date(mondayStart().getTime() + ((week - 1) * 7 + dayOffset) * DAY)
+    .toISOString()
+    .slice(0, 10);
+}
+
+const editorLead: PlannerPerson = {
+  id: "editor-lead",
+  name: "Lead Editor",
+  craft: "editor",
+  tier: "lead",
+  podId: "video-a",
+  weeklyHours: 10,
+  leaveWeeks: [],
+};
+
+const editorStandard: PlannerPerson = {
+  id: "editor-standard",
+  name: "Standard Editor",
+  craft: "editor",
+  tier: "standard",
+  podId: "video-a",
+  weeklyHours: 10,
+  leaveWeeks: [],
+};
+
+const writer: PlannerPerson = {
+  id: "writer-1",
+  name: "Writer",
+  craft: "writer",
+  tier: "standard",
+  podId: "writing",
+  weeklyHours: 10,
+  leaveWeeks: [],
+};
+
+function task(overrides: Partial<WorkItem> = {}): WorkItem {
+  return {
+    id: "work-1",
+    title: "Campaign deliverable",
+    clientId: "client-1",
+    craft: "editor",
+    podId: "video-a",
+    dueDate: dueInWeek(1),
+    estimatedHours: 4,
+    week: 1,
+    status: "open",
+    dependsOn: [],
+    ...overrides,
+  };
+}
+
+describe("capacity planner assignment scenarios", () => {
+  it("assigns work only to a matching craft in the matching pod", () => {
+    const plan = buildPlan([editorLead, writer], [task()]);
+    expect(plan.assignments[0].assignedTo).toBe("editor-lead");
+    expect(plan.assignments[0].assignedToName).toBe("Lead Editor");
+  });
+
+  it("does not assign work when no person has the required craft and pod", () => {
+    const plan = buildPlan([writer], [task()]);
+    expect(plan.assignments[0].assignedTo).toBeUndefined();
+    expect(plan.impossible).toHaveLength(1);
+    expect(plan.feasible).toBe(false);
+  });
+
+  it("never allocates more than a person's weekly hours", () => {
+    const onlyEditor = { ...editorStandard, weeklyHours: 10 };
+    const plan = buildPlan(
+      [onlyEditor],
+      [
+        task({ id: "large", estimatedHours: 8 }),
+        task({ id: "small", estimatedHours: 4 }),
+      ]
+    );
+    expect(plan.personUsage[0].planned).toBeLessThanOrEqual(10);
+    expect(plan.personUsage[0].overCapacity).toBe(false);
+    expect(plan.impossible.length).toBeGreaterThanOrEqual(1);
+  });
+
+  it("does not schedule a person during a planned leave week", () => {
+    const onLeave = { ...editorStandard, leaveWeeks: [1] };
+    const plan = buildPlan([onLeave], [task()]);
+    expect(plan.assignments[0].assignedTo).toBeUndefined();
+    expect(plan.personUsage[0].capacity).toBe(30);
+    expect(plan.feasible).toBe(false);
+  });
+
+  it("respects a one-week absence override", () => {
+    const plan = buildPlan(
+      [editorLead, editorStandard],
+      [task()],
+      { awayPersonId: editorLead.id, awayWeek: 1 }
+    );
+    expect(plan.assignments[0].assignedTo).toBe(editorStandard.id);
+  });
+
+  it("keeps an existing eligible assignee in the original week", () => {
+    const plan = buildPlan(
+      [editorLead, editorStandard],
+      [task({ assignedTo: editorStandard.id })]
+    );
+    expect(plan.assignments[0].assignedTo).toBe(editorStandard.id);
+    expect(plan.assignments[0].reason).toContain("Kept existing assignee");
+  });
+
+  it("schedules prerequisites before dependent work", () => {
+    const prerequisite = task({
+      id: "script",
+      craft: "writer",
+      podId: "writing",
+      week: 1,
+      dueDate: dueInWeek(1),
+    });
+    const dependent = task({
+      id: "edit",
+      week: 2,
+      dueDate: dueInWeek(2),
+      dependsOn: ["script"],
+    });
+    const plan = buildPlan([writer, editorStandard], [dependent, prerequisite]);
+    const scriptRow = plan.assignments.find((row) => row.id === "script");
+    const editRow = plan.assignments.find((row) => row.id === "edit");
+    expect(scriptRow?.assignedTo).toBe(writer.id);
+    expect(editRow?.assignedTo).toBe(editorStandard.id);
+    expect(scriptRow!.week).toBeLessThanOrEqual(editRow!.week);
+  });
+
+  it("marks work with an unavailable prerequisite as impossible", () => {
+    const plan = buildPlan(
+      [editorStandard],
+      [task({ dependsOn: ["missing-prerequisite"] })]
+    );
+    expect(plan.assignments[0].assignedTo).toBeUndefined();
+    expect(plan.assignments[0].reason).toContain("prerequisite");
+    expect(plan.feasible).toBe(false);
+  });
+
+  it("marks work whose due date has already passed as missing its date", () => {
+    const yesterday = new Date(mondayStart().getTime() - DAY)
+      .toISOString()
+      .slice(0, 10);
+    const plan = buildPlan(
+      [editorStandard],
+      [task({ dueDate: yesterday })]
+    );
+    expect(plan.assignments[0].missesDate).toBe(true);
+    expect(plan.impossible).toHaveLength(1);
+  });
+
+  it("adds scenario copies when the client volume is doubled", () => {
+    const plan = buildPlan(
+      [editorLead, editorStandard],
+      [task()],
+      { volumeMultiplier: 2 }
+    );
+    expect(plan.assignments).toHaveLength(2);
+    expect(plan.assignments.every((row) => row.assignedTo)).toBe(true);
+  });
+
+  it("limits a pod-lead plan to that pod's work and people", () => {
+    const writingTask = task({
+      id: "writing-work",
+      craft: "writer",
+      podId: "writing",
+    });
+    const plan = buildPlan(
+      [editorStandard, writer],
+      [task(), writingTask],
+      { targetPodId: "video-a" }
+    );
+    expect(plan.assignments.map((row) => row.id)).toEqual(["work-1"]);
+    expect(plan.personUsage.map((person) => person.id)).toEqual([
+      editorStandard.id,
+    ]);
+  });
+
+  it("models a pod lead's absence by removing their capacity", () => {
+    const plan = buildPlan(
+      [editorLead, editorStandard],
+      [task()],
+      { podLeadAwayId: editorLead.id }
+    );
+    expect(plan.personUsage.find((person) => person.id === editorLead.id)?.capacity)
+      .toBe(0);
+    expect(plan.assignments[0].assignedTo).toBe(editorStandard.id);
+  });
+
+  it("does not silently schedule a circular dependency", () => {
+    const a = task({ id: "a", dependsOn: ["b"] });
+    const b = task({ id: "b", dependsOn: ["a"] });
+    const plan = buildPlan([editorStandard], [a, b]);
+    expect(plan.feasible).toBe(false);
+    expect(plan.impossible.length).toBe(2);
+  });
+
+  it("reports an infeasible plan instead of returning an empty successful result", () => {
+    const plan = buildPlan([], [task()]);
+    expect(plan.feasible).toBe(false);
+    expect(plan.impossible).toHaveLength(1);
+    expect(plan.summary).toContain("cannot be scheduled");
+  });
+});
+
+
+it("builds an 80-deliverable four-week plan for 30 people within the two-second target", () => {
+  const people: PlannerPerson[] = [
+    ...Array.from({ length: 15 }, (_, i) => ({
+      ...editorStandard, id: `editor-${i}`, name: `Editor ${i}`, weeklyHours: 36,
+    })),
+    ...Array.from({ length: 5 }, (_, i) => ({
+      ...writer, id: `writer-${i}`, name: `Writer ${i}`, weeklyHours: 36,
+    })),
+    ...Array.from({ length: 5 }, (_, i) => ({
+      ...writer, id: `designer-${i}`, name: `Designer ${i}`, craft: "designer" as const,
+      podId: "design", weeklyHours: 36,
+    })),
+    ...Array.from({ length: 5 }, (_, i) => ({
+      ...writer, id: `account-${i}`, name: `Account Manager ${i}`,
+      craft: "account_manager" as const, podId: "account-management", weeklyHours: 36,
+    })),
+  ];
+  const crafts = [
+    { craft: "editor" as const, podId: "video-a" },
+    { craft: "writer" as const, podId: "writing" },
+    { craft: "designer" as const, podId: "design" },
+    { craft: "account_manager" as const, podId: "account-management" },
+  ];
+  const items = Array.from({ length: 80 }, (_, i) => {
+    const group = crafts[i % crafts.length];
+    const week = (Math.floor(i / 20) % 4) + 1;
+    return task({
+      id: `perf-${i}`, craft: group.craft, podId: group.podId,
+      week, dueDate: dueInWeek(week), estimatedHours: 2,
+    });
+  });
+  const started = performance.now();
+  const result = buildPlan(people, items);
+  const elapsed = performance.now() - started;
+  expect(people).toHaveLength(30);
+  expect(result.assignments).toHaveLength(80);
+  expect(elapsed).toBeLessThan(2000);
+});

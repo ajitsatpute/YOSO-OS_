@@ -1,0 +1,102 @@
+import {config} from "dotenv";config({path:".env.local"});
+import {createClient} from "@supabase/supabase-js";
+import {createHash} from "node:crypto";
+const url=process.env.NEXT_PUBLIC_SUPABASE_URL!,key=process.env.SUPABASE_SERVICE_ROLE_KEY!;
+if(!url||!key)throw new Error("Set NEXT_PUBLIC_SUPABASE_URL and SUPABASE_SERVICE_ROLE_KEY");
+const db=createClient(url,key);
+const podNames=["Video Editing Alpha","Video Editing Beta","Video Editing Gamma","Writing","Design","Account Management"];
+const names=["Aarav","Diya","Kabir","Meera","Ishaan","Anaya","Reyansh","Saanvi","Vivaan","Aadhya","Arjun","Myra","Advik","Kiara","Rudra","Ira","Atharv","Sara","Vihaan","Pari","Krish","Tara","Ayaan","Navya","Dhruv","Riya","Neil","Mira","Dev","Zoya"];
+const clientNames=["Northstar Foods","Mango Street","Blue Orbit","Paperplane Labs","Green Basket","Studio Katha","Urban Loom","Pixel Orchard","Monsoon Media","Copper Leaf","BrightPath","Quiet River"];
+function stableUuid(input:string){const h=createHash("sha256").update(input).digest("hex").slice(0,32);return `${h.slice(0,8)}-${h.slice(8,12)}-4${h.slice(13,16)}-a${h.slice(17,20)}-${h.slice(20,32)}`}
+async function main(){
+ const {data:pods,error:pe}=await db.from("pods").upsert(podNames.map(name=>({name})),{onConflict:"name"}).select();if(pe)throw pe;const podId=Object.fromEntries(pods!.map(p=>[p.name,p.id]));
+ const people=names.map((name,i)=>{const craft=i<15?"editor":i<20?"writer":i<25?"designer":"account_manager";const pod=craft==="editor"?podNames[Math.floor(i/5)]:craft==="writer"?"Writing":craft==="designer"?"Design":"Account Management";return{id:`person-${String(i+1).padStart(2,"0")}`,name,craft,tier:(i%5===0?"senior":i%5===1?"junior":i%5===2?"standard":i%5===3?"intern":"lead"),pod_id:podId[pod],weekly_hours:i%7===0?24:36,leave_weeks:i%9===0?[3]:[]}});
+ const {error:ee}=await db.from("employees").upsert(people);if(ee)throw ee;
+ // Do not use upsert(onConflict: "name"): the original clients table has no
+ // UNIQUE constraint on name. Read existing rows and insert only missing names.
+ const {data:existingClients,error:existingClientsError}=await db.from("clients").select("id,name");
+ if(existingClientsError)throw existingClientsError;
+ const clientsByName=new Map<string,{id:string;name:string}>();
+ for(const client of existingClients||[])clientsByName.set(client.name,client);
+ const missingClientNames=clientNames.filter(name=>!clientsByName.has(name));
+ if(missingClientNames.length){
+   const {data:insertedClients,error:insertClientsError}=await db.from("clients").insert(missingClientNames.map(name=>({name}))).select("id,name");
+   if(insertClientsError)throw insertClientsError;
+   for(const client of insertedClients||[])clientsByName.set(client.name,client);
+ }
+ const clients=clientNames.map(name=>clientsByName.get(name)).filter((client):client is {id:string;name:string}=>Boolean(client));
+ if(clients.length!==clientNames.length)throw new Error("Could not resolve every sample client after insert.");
+ const existing=await db.from("channels").select("id,client_id");const channelMap=new Map((existing.data||[]).map(c=>[c.client_id,c.id]));const missing=clients!.filter(c=>!channelMap.has(c.id));if(missing.length){const {data:newChannels,error}=await db.from("channels").insert(missing.map(c=>({client_id:c.id,name:`${c.name} · WhatsApp`}))).select();if(error)throw error;for(const c of newChannels||[])channelMap.set(c.client_id,c.id)}
+ const now=new Date(),messages:any[]=[];for(let c=0;c<clients!.length;c++){for(let day=0;day<90;day++){const date=new Date(now.getTime()-(90-day)*86400000);date.setUTCHours(3,30,0,0);for(let n=0;n<24;n++){const distressed=c%4===2&&day>65,positive=c%4===0;const clientTexts=distressed?["This is delayed again, not acceptable","Please fix the same issue","We are disappointed with this update","कब तक मिलेगा? बहुत delay हो रहा है"]:positive?["Looks good, approved","Thanks, perfect","Great work team","बहुत अच्छा काम, approved","Haan, this looks perfect"]:["Please share the update","Can we revise this section?","Okay, will review","Done, thanks","ठीक है, कल review करूँगा","Haan, please check once"];const teamTexts=["We are checking and will update shortly","Shared the revised draft","Thanks for confirming","We will send this by tomorrow","Haan, revised file share kar di hai","हम आज शाम तक अपडेट देंगे"];const fromClient=n%2===0;const text=(fromClient?clientTexts:teamTexts)[(day+n)%(fromClient?clientTexts.length:teamTexts.length)];const id=stableUuid(`${clients![c].id}:${day}:${n}`);messages.push({id,channel_id:channelMap.get(clients![c].id),client_id:clients![c].id,sender_name:fromClient?`Client ${c+1}`:`YOSO ${n+1}`,sender_role:fromClient?"client":"yoso",type:"text",text,sent_at:new Date(date.getTime()+n*20*60000).toISOString(),edited_at:day===20&&n===0?new Date(date.getTime()+3600000).toISOString():null,deleted_at:day===10&&n===1?new Date(date.getTime()+7200000).toISOString():null})}}}
+ for(let i=0;i<messages.length;i+=500){const {error}=await db.from("chat_messages").upsert(messages.slice(i,i+500),{onConflict:"id"});if(error)throw error}
+ 
+ const podForCraft = (craft: string, index: number) =>
+   craft === "editor"
+     ? podId[podNames[Math.floor(index / 4) % 3]]
+     : craft === "writer"
+       ? podId.Writing
+       : craft === "designer"
+         ? podId.Design
+         : podId["Account Management"];
+
+ const crafts = [
+   "writer",
+   "editor",
+   "designer",
+   "account_manager",
+ ];
+
+ const stageNames = [
+   "Script",
+   "Editing",
+   "Design",
+   "Review",
+ ];
+
+ const horizon = new Date(now);
+ horizon.setUTCHours(0, 0, 0, 0);
+ horizon.setUTCDate(
+   horizon.getUTCDate() - ((horizon.getUTCDay() + 6) % 7)
+ );
+
+ const tasks = Array.from({ length: 80 }, (_, i) => {
+   const campaign = Math.floor(i / 4);
+   const stage = i % 4;
+   const craft = crafts[stage];
+   const week = (campaign % 4) + 1;
+
+   const due = new Date(
+     horizon.getTime() +
+       ((week - 1) * 7 + 5 + stage) * 86400000
+   );
+
+   const assignedPod = podForCraft(craft, campaign);
+
+   return {
+     id: `task-${i + 1}`,
+     title: `${stageNames[stage]} - Campaign ${campaign + 1}`,
+     client_id: clients[campaign % clients.length].id,
+     pod_id: assignedPod,
+     craft,
+     due_date: due.toISOString().slice(0, 10),
+     estimated_hours: 4 + (i % 4) * 2,
+     week,
+     status: stage === 0 ? "assigned" : "open",
+     assigned_to:
+       stage === 0
+         ? people.find(
+             p => p.craft === craft && p.pod_id === assignedPod
+           )?.id ?? null
+         : null,
+     depends_on:
+       stage === 0
+       
+         ? []
+         : [`task-${campaign * 4 + stage}`],
+   };
+ });
+
+ const {error:te}=await db.from("deliverables").upsert(tasks);if(te)throw te;
+ console.log(`Seeded ${people.length} people across ${pods!.length} operating groups, ${clients!.length} clients, ${messages.length} deterministic chat messages and ${tasks.length} deliverables.`)
+}
+main().catch(e=>{console.error(e);process.exit(1)});
